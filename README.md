@@ -1,7 +1,8 @@
 # ML Systems Journey
 
 ### Quick Note
-I created this with ChatGPT, if this note is here it probably needs tweaks that I will be adding moving forward
+* I created this with ChatGPT, if this note is here it probably needs tweaks that I will be adding moving forward
+* I also am using arch, so if its needed it will be geared towards that at first. If more support is needed I will come back
 
 > Complete **Core Path** (\~150 h) and optional **Full‑Book Track**
 >
@@ -31,11 +32,13 @@ I created this with ChatGPT, if this note is here it probably needs tweaks that 
 * **Reading:** Prefaces of DDIA & PMPP; review `ml-eng` README
 * **Skill Objective:** Map each resource → pain point (e.g., “DDIA = safe data”)
 * **Quick‑Start:**
+* I use uv, feel free to swap in pip
 
   ```bash
   git init ml-systems-journey && cd $_
   echo "# ML Systems Journey" > README.md
   mkdir ddia ml-eng pmpp notes
+  uv init
   docker run --rm -it --gpus all -v $PWD:/ws -w /ws nvcr.io/nvidia/pytorch:24.03-py3 bash
   ```
 * **Acceptance Criteria:**
@@ -57,31 +60,78 @@ I created this with ChatGPT, if this note is here it probably needs tweaks that 
 * **Reading:** “Kafka in 5 min” blog post
 * **Skill Objective:** Understand queue decoupling (producer/consumer resilience)
 * **Quick‑Start:**
+* Everything needed:
+    ```bash
+    yay -S docker-compose kcat-cli uv
+    ```
+    ```bash
+    uv add kafka-python
+    ```
+
 
   ```bash
   cat <<EOF > docker-compose.yml
-  services:
-    kafka:
-      image: bitnami/kafka
-      environment:
-        - KAFKA_LISTENERS=PLAINTEXT://:9092
-        - ALLOW_PLAINTEXT_LISTENER=yes
-      ports:
-        - "9092:9092"
+    services:
+      kafka:
+        image: bitnami/kafka:latest
+        ports:
+          - "9092:9092"
+        environment:
+          - KAFKA_CFG_NODE_ID=0
+          - KAFKA_CFG_PROCESS_ROLES=controller,broker
+          - KAFKA_CFG_LISTENERS=PLAINTEXT://:9092,CONTROLLER://:9093
+          - KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+          - KAFKA_CFG_CONTROLLER_QUORUM_VOTERS=0@kafka:9093
+          - KAFKA_CFG_CONTROLLER_LISTENER_NAMES=CONTROLLER
+          - KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE=true
+          - KAFKA_CFG_ADVERTISED_LISTENERS=PLAINTEXT://localhost:9092   
+          - ALLOW_PLAINTEXT_LISTENER=yes                               
+
   EOF
-  docker compose up -d
-  pip install kafka-python kcat
-  python - <<'PY'
-  from kafka import KafkaProducer
-  import json, uuid, random, time
-  p = KafkaProducer(
-      bootstrap_servers="localhost:9092",
-      value_serializer=lambda v: json.dumps(v).encode()
-  )
-  while True:
-      msg = {"id": str(uuid.uuid4()), "v": random.random()}
-      p.send("demo", msg); p.flush(); time.sleep(1)
-  PY
+  docker-compose up --detach
+  docker-compose exec kafka \                                                                                      
+    kafka-topics.sh \
+    --bootstrap-server localhost:9092 \
+    --create \
+    --topic demo \
+    --partitions 1 \
+    --replication-factor 1
+  uv add kafka-python
+  uv run --with 'kafka-python>=2.0' python - <<'PY'
+    import json, uuid, random, time, signal, sys
+    from kafka import KafkaProducer, errors
+
+    BOOTSTRAP = "localhost:9092"   
+    TOPIC     = "demo"             
+    INTERVAL  = 1.0                
+
+    producer = KafkaProducer(
+        bootstrap_servers=BOOTSTRAP,
+        value_serializer=lambda v: json.dumps(v).encode(),
+        request_timeout_ms=5000,   
+    )
+
+    def shutdown(*_):
+        print("\n↩ flushing and closing …")
+        producer.flush()
+        producer.close()
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT,  shutdown)
+    signal.signal(signal.SIGTERM, shutdown)
+
+    while True:
+        payload = {"id": str(uuid.uuid4()), "v": random.random()}
+        try:
+            meta = producer.send(TOPIC, payload).get(timeout=5)
+            print(f"✓ {payload['id']} → {meta.topic}:{meta.partition}@{meta.offset}")
+        except errors.KafkaError as exc:
+            print("send failed:", exc)
+        time.sleep(INTERVAL)
+    PY
+  ```
+    run in a separate terminal
+  ```bash
   kcat -b localhost:9092 -t demo -C &
   sleep 3 && docker stop kafka && sleep 5 && docker start kafka
   ```
